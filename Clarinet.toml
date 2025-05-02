@@ -5,6 +5,11 @@ authors = []
 telemetry = true
 cache_dir = "./.cache"
 
+[contracts.bondingcurvestxfun]
+path = "contracts/bondingcurvestxfun2.clar"
+clarity_version = 2
+epoch = 2.4
+
 # [contracts.CHANGE-THIS-TO-YOUR-CONTRACT-NAME]
 # path = "contracts/CHANGE-THIS-TO-YOUR-CONTRACT-NAME.clar"
 
