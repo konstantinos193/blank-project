@@ -10,8 +10,8 @@ plan:
       transactions:
         - contract-publish:
             contract-name: bondingcurvestxfun
-            expected-sender: SP1SGERGYBA7SFT4FABB6ETN139Z1VBJHC2JSBR4A
-            cost: 27774
+            expected-sender: SPDVDH3DQFM32792YPHYZ0CA0YKSJ20JSDSS2GCR
+            cost: 32478
             path: contracts/bondingcurvestxfun2.clar
             anchor-block-only: true
             clarity-version: 2
