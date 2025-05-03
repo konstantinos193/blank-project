@@ -14,6 +14,7 @@
 (define-constant ERR_TOKEN_NOT_BONDED u703)
 (define-constant ERR_INSUFFICIENT_CURVE_BALANCE u704)
 (define-constant ERR_POOL_ALREADY_CREATED u706)
+(define-constant ERR_POST_CONDITION_CONFLICT u1001)
 
 ;; Token counter
 (define-data-var token-counter uint u0)
@@ -126,6 +127,14 @@
 (define-constant BLOCKS_4H u240)  ;; 4 hours = 240 blocks
 (define-constant BLOCKS_1D u1440) ;; 1 day = 1440 blocks
 
+;; Warn about potential post-condition conflicts
+(define-private (check-post-condition (stx-amount uint))
+  (if (> stx-amount u0)
+      (begin
+        (print {event: "warning", message: "Function involves STX transfer, ensure post-conditions allow", amount: stx-amount})
+        true)
+      true))
+
 ;; Get price based on total sold
 (define-read-only (get-price (total-sold uint))
   (let ((price (* BASE_PRICE (* SLOPE total-sold))))
@@ -165,6 +174,9 @@
                 (begin
                   (print {event: "error", error: "insufficient STX for launch fee", required: launch-fee-amount, available: (stx-get-balance creator)})
                   (err ERR_INSUFFICIENT_STX)))
+      
+      ;; Warn about post-condition
+      (check-post-condition (+ launch-fee-amount (if (> initial-purchase u0) total-cost u0)))
       
       ;; Pay launch fee to treasury
       (try! (stx-transfer? launch-fee-amount creator TREASURY))
@@ -341,7 +353,7 @@
       ;; Check if token is bonded
       (asserts! (not (get bonded token))
                 (begin
-                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (print {event: "error", error: "token is bonded, trading frozen", token-id: id, bonded: (get bonded token)})
                   (err ERR_TOKEN_BONDED)))
       
       ;; Check STX balance
@@ -349,6 +361,9 @@
                 (begin
                   (print {event: "error", error: "insufficient STX for buy", required: total-cost, available: (stx-get-balance buyer)})
                   (err ERR_INSUFFICIENT_STX)))
+      
+      ;; Warn about post-condition
+      (check-post-condition total-cost)
       
       ;; Perform transfers
       (try! (stx-transfer? net-cost buyer (as-contract tx-sender)))
@@ -467,7 +482,7 @@
       ;; Check if token is bonded
       (asserts! (not (get bonded token))
                 (begin
-                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (print {event: "error", error: "token is bonded, trading frozen", token-id: id, bonded: (get bonded token)})
                   (err ERR_TOKEN_BONDED)))
       
       ;; Check balances
@@ -479,6 +494,9 @@
                 (begin
                   (print {event: "error", error: "insufficient curve balance", required: total-return, available: (get amount curve-balance)})
                   (err ERR_INSUFFICIENT_CURVE_BALANCE)))
+      
+      ;; Warn about post-condition
+      (check-post-condition total-return)
       
       ;; Update balances
       (map-set balances
@@ -547,6 +565,9 @@
       (asserts! (> (get amount curve-balance) u0) (err ERR_INSUFFICIENT_CURVE_BALANCE))
       (asserts! (is-eq pool-address PLATFORM) (err ERR_INVALID_INPUT))
       
+      ;; Warn about post-condition
+      (check-post-condition (get amount curve-balance))
+      
       ;; Perform transfer
       (try! (stx-transfer? (get amount curve-balance) PLATFORM pool-address))
       (map-set curve-balances
@@ -591,6 +612,9 @@
       (asserts! (get bonded token) (err ERR_TOKEN_NOT_BONDED))
       (asserts! (>= (get amount curve-balance) amount) (err ERR_INSUFFICIENT_CURVE_BALANCE))
       
+      ;; Warn about post-condition
+      (check-post-condition amount)
+      
       ;; Perform transfer
       (try! (as-contract (stx-transfer? amount (as-contract tx-sender) PLATFORM)))
       (map-set curve-balances
@@ -613,7 +637,7 @@
       ;; Check if token is bonded
       (asserts! (not (get bonded token))
                 (begin
-                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (print {event: "error", error: "token is bonded, trading frozen", token-id: id, bonded: (get bonded token)})
                   (err ERR_TOKEN_BONDED)))
       
       ;; Check balance
@@ -661,7 +685,7 @@
       ;; Check if token is bonded
       (asserts! (not (get bonded token))
                 (begin
-                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (print {event: "error", error: "token is bonded, trading frozen", token-id: id, bonded: (get bonded token)})
                   (err ERR_TOKEN_BONDED)))
       
       ;; Check balance
@@ -829,7 +853,7 @@
 
 ;; Get TradingView price data
 (define-read-only (get-tradingview-data (id uint) (timeframe uint) (block uint))
-  (let ((price-data (map-get? price-history {id: id, timeframe: timeframe, block: block})))
+  (let ((price-data (map-get? coi history {id: id, timeframe: timeframe, block: block})))
     (if (is-some price-data)
         (ok (unwrap-panic price-data))
         (err ERR_NOT_FOUND))))
