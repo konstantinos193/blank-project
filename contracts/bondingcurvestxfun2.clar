@@ -5,6 +5,15 @@
 (define-constant BASE_PRICE u199)  ;; Initial price of 199 microSTX
 (define-constant SLOPE u1)
 (define-constant FEE_PERCENT u5)
+(define-constant ERR_INSUFFICIENT_STX u1000)
+(define-constant ERR_INVALID_INPUT u400)
+(define-constant ERR_UNAUTHORIZED u403)
+(define-constant ERR_NOT_FOUND u404)
+(define-constant ERR_INSUFFICIENT_BALANCE u700)
+(define-constant ERR_TOKEN_BONDED u701)
+(define-constant ERR_TOKEN_NOT_BONDED u703)
+(define-constant ERR_INSUFFICIENT_CURVE_BALANCE u704)
+(define-constant ERR_POOL_ALREADY_CREATED u706)
 
 ;; Token counter
 (define-data-var token-counter uint u0)
@@ -125,13 +134,13 @@
 ;; Launch token and optionally buy initial tokens
 (define-public (launch-token
   (initial-purchase uint)
-    (name (string-ascii 32))
-    (symbol (string-ascii 8))
-    (description (string-ascii 256))
-    (website (string-ascii 256))
-    (twitter (string-ascii 256))
-    (telegram (string-ascii 256))
-    (logo-url (string-ascii 512)))
+  (name (string-ascii 32))
+  (symbol (string-ascii 8))
+  (description (string-ascii 256))
+  (website (string-ascii 256))
+  (twitter (string-ascii 256))
+  (telegram (string-ascii 256))
+  (logo-url (string-ascii 512)))
   (let ((creator tx-sender)
         (id (var-get token-counter))
         (total-supply u21000000)
@@ -139,24 +148,36 @@
         (price (get price price-result))
         (total-cost (* price initial-purchase))
         (fee (/ (* total-cost FEE_PERCENT) u100))
-        (net-cost (- total-cost fee)))
+        (net-cost (- total-cost fee))
+        (launch-fee-amount (var-get launch-fee)))
     (begin
       ;; Validate inputs
-      (asserts! (> (len name) u0) (err u400))
-      (asserts! (> (len symbol) u0) (err u400))
-      (asserts! (> (len description) u0) (err u400))
-      (asserts! (<= (len website) u256) (err u400))
-      (asserts! (<= (len twitter) u256) (err u400))
-      (asserts! (<= (len telegram) u256) (err u400))
-      (asserts! (<= (len logo-url) u512) (err u400))
+      (asserts! (> (len name) u0) (err ERR_INVALID_INPUT))
+      (asserts! (> (len symbol) u0) (err ERR_INVALID_INPUT))
+      (asserts! (> (len description) u0) (err ERR_INVALID_INPUT))
+      (asserts! (<= (len website) u256) (err ERR_INVALID_INPUT))
+      (asserts! (<= (len twitter) u256) (err ERR_INVALID_INPUT))
+      (asserts! (<= (len telegram) u256) (err ERR_INVALID_INPUT))
+      (asserts! (<= (len logo-url) u512) (err ERR_INVALID_INPUT))
+      
+      ;; Check STX balance for launch fee
+      (asserts! (>= (stx-get-balance creator) launch-fee-amount)
+                (begin
+                  (print {event: "error", error: "insufficient STX for launch fee", required: launch-fee-amount, available: (stx-get-balance creator)})
+                  (err ERR_INSUFFICIENT_STX)))
       
       ;; Pay launch fee to treasury
-      (try! (stx-transfer? (var-get launch-fee) creator TREASURY))
+      (try! (stx-transfer? launch-fee-amount creator TREASURY))
       
-      ;; Only process initial purchase if amount is greater than 0
+      ;; Process initial purchase if amount > 0
       (if (> initial-purchase u0)
           (begin
-            ;; Buy initial tokens from bonding curve (with 5% fee)
+            ;; Check STX balance for purchase
+            (asserts! (>= (stx-get-balance creator) total-cost)
+                      (begin
+                        (print {event: "error", error: "insufficient STX for initial purchase", required: total-cost, available: (stx-get-balance creator)})
+                        (err ERR_INSUFFICIENT_STX)))
+            ;; Buy initial tokens
             (try! (stx-transfer? net-cost creator (as-contract tx-sender)))
             (try! (stx-transfer? fee creator TREASURY))
             (map-set balances
@@ -194,17 +215,19 @@
           holder-count: (if (> initial-purchase u0) u1 u0)
         })
       (var-set token-counter (+ id u1))
+      (print {event: "launch-token", token-id: id, creator: creator, initial-purchase: initial-purchase})
       (ok {id: id}))))
 
-;; Function to update launch fee
+;; Update launch fee
 (define-public (update-launch-fee (new-fee uint))
   (begin
-    (asserts! (is-eq tx-sender TREASURY) (err u403))
-    (asserts! (> new-fee u0) (err u400))
+    (asserts! (is-eq tx-sender TREASURY) (err ERR_UNAUTHORIZED))
+    (asserts! (> new-fee u0) (err ERR_INVALID_INPUT))
     (var-set launch-fee new-fee)
+    (print {event: "update-launch-fee", new-fee: new-fee})
     (ok true)))
 
-;; Function to update holder list
+;; Update holder list
 (define-private (update-holder (id uint) (holder principal) (amount uint))
   (let ((balance (default-to {amount: u0} (map-get? balances {id: id, owner: holder})))
         (new-balance (+ (get amount balance) amount)))
@@ -212,12 +235,12 @@
       (map-set balances {id: id, owner: holder} {amount: new-balance})
       (map-set is-holder {id: id, holder: holder} {is-holder: true}))))
 
-;; Function to update token stats
+;; Update token stats
 (define-private (update-token-stats (id uint) (amount uint) (price uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (volume (* amount price))
         (current-block block-height)
-        (blocks-24h u144))  ;; Assuming 1 block = 10 minutes, 24h = 144 blocks
+        (blocks-24h u144))
     (begin
       ;; Update price history if 24h has passed
       (if (>= (- current-block (get creation-block token)) blocks-24h)
@@ -243,7 +266,7 @@
             holder-count: holder-count
           }))))))
 
-;; Function to record price data for TradingView
+;; Record price data for TradingView
 (define-private (record-price-data (id uint) (price uint) (amount uint))
   (let ((current-block block-height)
         (volume (* amount price)))
@@ -293,7 +316,6 @@
                     close: price,
                     volume: (+ (get volume data) volume)
                   })))))
-      ;; Similar for 1h, 4h, and 1d timeframes
       true)))
 
 ;; Buy function with bonding logic
@@ -301,23 +323,34 @@
   (let ((buyer tx-sender)
         (token-opt (map-get? token-data {id: id}))
         (token (unwrap-panic token-opt))
-    (total-sold (get total-sold token))
+        (total-sold (get total-sold token))
         (price-result (unwrap-panic (get-price total-sold)))
         (price (get price price-result))
-    (total-cost (* price amount))
-    (fee (/ (* total-cost FEE_PERCENT) u100))
-    (net-cost (- total-cost fee))
-    (new-sold (+ total-sold amount))
+        (total-cost (* price amount))
+        (fee (/ (* total-cost FEE_PERCENT) u100))
+        (net-cost (- total-cost fee))
+        (new-sold (+ total-sold amount))
         (curve-balance (default-to {amount: u0} (map-get? curve-balances {id: id})))
         (new-curve-balance (+ (get amount curve-balance) net-cost))
         (tx-id (var-get transaction-counter)))
     (begin
       ;; Validate inputs
-      (asserts! (> amount u0) (err u400))
-      (asserts! (is-some token-opt) (err u404))
+      (asserts! (> amount u0) (err ERR_INVALID_INPUT))
+      (asserts! (is-some token-opt) (err ERR_NOT_FOUND))
       
-      ;; Prevent buying if token is bonded
-      (asserts! (not (get bonded token)) (err u701))
+      ;; Check if token is bonded
+      (asserts! (not (get bonded token))
+                (begin
+                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (err ERR_TOKEN_BONDED)))
+      
+      ;; Check STX balance
+      (asserts! (>= (stx-get-balance buyer) total-cost)
+                (begin
+                  (print {event: "error", error: "insufficient STX for buy", required: total-cost, available: (stx-get-balance buyer)})
+                  (err ERR_INSUFFICIENT_STX)))
+      
+      ;; Perform transfers
       (try! (stx-transfer? net-cost buyer (as-contract tx-sender)))
       (try! (stx-transfer? fee buyer TREASURY))
 
@@ -330,6 +363,7 @@
       (map-set curve-balances
         {id: id}
         {amount: new-curve-balance})
+      
       ;; Log transaction
       (map-set transactions
         {id: id, tx-id: tx-id}
@@ -342,7 +376,6 @@
           tx-type: "buy",
           block-height: block-height
         })
-      ;; Emit event
       (print {
         event: "buy",
         token-id: id,
@@ -355,6 +388,8 @@
         block-height: block-height
       })
       (var-set transaction-counter (+ tx-id u1))
+      
+      ;; Check for bonding
       (if (and (not (get bonded token))
                (>= new-curve-balance (var-get graduation-threshold)))
           (begin
@@ -362,37 +397,40 @@
               (map-set token-data
                 {id: id}
                 (merge token {bonded: true, snapshot-block: snapshot-block}))
-              ;; Take snapshot of creator's balance
               (map-set holder-snapshots
                 {id: id, holder: (get creator token)}
                 {amount: (get amount (unwrap-panic (map-get? balances {id: id, owner: (get creator token)}))), snapshot-block: snapshot-block})
-              ;; Send creator reward from contract
-              (try! (as-contract (stx-transfer? (var-get creator-reward) (as-contract tx-sender) (get creator token))))
-              true))
+              ;; Check STX balance for creator reward
+              (asserts! (>= (stx-get-balance (as-contract tx-sender)) (var-get creator-reward))
+                        (begin
+                          (print {event: "error", error: "insufficient contract STX for creator reward", required: (var-get creator-reward)})
+                          (err ERR_INSUFFICIENT_STX)))
+              (try! (as-contract (stx-transfer? (var-get creator-reward) (as-contract tx-sender) (get creator token)))))
+            true)
           true)
       (ok {price: price, total-cost: total-cost}))))
 
-;; Function to update graduation threshold
+;; Update graduation threshold
 (define-public (update-graduation-threshold (new-threshold uint))
   (begin
-    (asserts! (is-eq tx-sender TREASURY) (err u403))
-    (asserts! (> new-threshold u0) (err u400))
+    (asserts! (is-eq tx-sender TREASURY) (err ERR_UNAUTHORIZED))
+    (asserts! (> new-threshold u0) (err ERR_INVALID_INPUT))
     (var-set graduation-threshold new-threshold)
+    (print {event: "update-graduation-threshold", new-threshold: new-threshold})
     (ok true)))
 
-;; Function to update creator reward
+;; Update creator reward
 (define-public (update-creator-reward (new-reward uint))
   (begin
-    (asserts! (is-eq tx-sender TREASURY) (err u403))
-    (asserts! (> new-reward u0) (err u400))
+    (asserts! (is-eq tx-sender TREASURY) (err ERR_UNAUTHORIZED))
+    (asserts! (> new-reward u0) (err ERR_INVALID_INPUT))
     (var-set creator-reward new-reward)
+    (print {event: "update-creator-reward", new-reward: new-reward})
     (ok true)))
 
 ;; Get minimum of two numbers
 (define-private (get-min (a uint) (b uint))
-  (if (< a b)
-      a
-      b))
+  (if (< a b) a b))
 
 ;; Get single transaction
 (define-read-only (get-transaction (id uint) (tx-id uint))
@@ -407,12 +445,12 @@
   (let ((seller tx-sender)
         (token-opt (map-get? token-data {id: id}))
         (token (unwrap-panic token-opt))
-    (total-sold (get total-sold token))
+        (total-sold (get total-sold token))
         (price-result (unwrap-panic (get-price total-sold)))
         (price (get price price-result))
-    (total-return (* price amount))
-    (fee (/ (* total-return FEE_PERCENT) u100))
-    (net-return (- total-return fee))
+        (total-return (* price amount))
+        (fee (/ (* total-return FEE_PERCENT) u100))
+        (net-return (- total-return fee))
         (user-balance-opt (map-get? balances {id: id, owner: seller}))
         (user-balance (unwrap-panic user-balance-opt))
         (curve-balance-opt (map-get? curve-balances {id: id}))
@@ -421,14 +459,28 @@
         (tx-id (var-get transaction-counter)))
     (begin
       ;; Validate inputs
-      (asserts! (> amount u0) (err u400))
-      (asserts! (is-some token-opt) (err u404))
-      (asserts! (is-some user-balance-opt) (err u404))
-      (asserts! (is-some curve-balance-opt) (err u404))
+      (asserts! (> amount u0) (err ERR_INVALID_INPUT))
+      (asserts! (is-some token-opt) (err ERR_NOT_FOUND))
+      (asserts! (is-some user-balance-opt) (err ERR_NOT_FOUND))
+      (asserts! (is-some curve-balance-opt) (err ERR_NOT_FOUND))
       
-      (asserts! (not (get bonded token)) (err u702))
-      (asserts! (>= (get amount user-balance) amount) (err u700))
-      (asserts! (>= (get amount curve-balance) total-return) (err u704))
+      ;; Check if token is bonded
+      (asserts! (not (get bonded token))
+                (begin
+                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (err ERR_TOKEN_BONDED)))
+      
+      ;; Check balances
+      (asserts! (>= (get amount user-balance) amount)
+                (begin
+                  (print {event: "error", error: "insufficient token balance", required: amount, available: (get amount user-balance)})
+                  (err ERR_INSUFFICIENT_BALANCE)))
+      (asserts! (>= (get amount curve-balance) total-return)
+                (begin
+                  (print {event: "error", error: "insufficient curve balance", required: total-return, available: (get amount curve-balance)})
+                  (err ERR_INSUFFICIENT_CURVE_BALANCE)))
+      
+      ;; Update balances
       (map-set balances
         {id: id, owner: seller}
         {amount: (- (get amount user-balance) amount)})
@@ -440,6 +492,7 @@
       (map-set curve-balances
         {id: id}
         {amount: new-curve-balance})
+      
       ;; Log transaction
       (map-set transactions
         {id: id, tx-id: tx-id}
@@ -452,7 +505,6 @@
           tx-type: "sell",
           block-height: block-height
         })
-      ;; Emit event
       (print {
         event: "sell",
         token-id: id,
@@ -465,79 +517,89 @@
         block-height: block-height
       })
       (var-set transaction-counter (+ tx-id u1))
+      
+      ;; Perform transfers
       (try! (as-contract (stx-transfer? net-return (as-contract tx-sender) seller)))
       (try! (as-contract (stx-transfer? fee (as-contract tx-sender) TREASURY)))
       (ok {price: price, total-return: total-return}))))
 
-;; Function to get all holders at snapshot
+;; Get all holders at snapshot
 (define-read-only (get-all-holders (id uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id}))))
     (if (not (get bonded token))
-        (err u709)
+        (err ERR_TOKEN_NOT_BONDED)
         (ok (map-get? holder-snapshots {id: id, holder: tx-sender})))))
 
-;; Function to get a specific holder's snapshot
+;; Get specific holder's snapshot
 (define-read-only (get-holder-snapshot (id uint) (holder principal))
   (let ((token (unwrap-panic (map-get? token-data {id: id}))))
     (if (not (get bonded token))
-        (err u709)
+        (err ERR_TOKEN_NOT_BONDED)
         (ok (map-get? holder-snapshots {id: id, holder: holder})))))
 
-;; Function to create pool with bonding curve funds
+;; Create pool with bonding curve funds
 (define-public (create-pool (id uint) (pool-address principal))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (curve-balance (unwrap-panic (map-get? curve-balances {id: id}))))
     (begin
-      (asserts! (is-eq tx-sender PLATFORM) (err u403))
-      (asserts! (get bonded token) (err u703))
-      (asserts! (> (get amount curve-balance) u0) (err u705))
-      (asserts! (is-eq pool-address PLATFORM) (err u400))  ;; Validate pool address
+      (asserts! (is-eq tx-sender PLATFORM) (err ERR_UNAUTHORIZED))
+      (asserts! (get bonded token) (err ERR_TOKEN_NOT_BONDED))
+      (asserts! (> (get amount curve-balance) u0) (err ERR_INSUFFICIENT_CURVE_BALANCE))
+      (asserts! (is-eq pool-address PLATFORM) (err ERR_INVALID_INPUT))
+      
+      ;; Perform transfer
       (try! (stx-transfer? (get amount curve-balance) PLATFORM pool-address))
       (map-set curve-balances
         {id: id}
         {amount: u0})
+      (print {event: "create-pool", token-id: id, pool-address: pool-address})
       (ok true))))
 
-;; Function to prepare pool creation
+;; Prepare pool creation
 (define-public (prepare-pool-creation (id uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (curve-balance (unwrap-panic (map-get? curve-balances {id: id}))))
     (begin
-      (asserts! (is-eq tx-sender PLATFORM) (err u403))
-      (asserts! (get bonded token) (err u703))
-      (asserts! (not (get pool-created token)) (err u706))
-      (asserts! (> (get amount curve-balance) u0) (err u705))
+      (asserts! (is-eq tx-sender PLATFORM) (err ERR_UNAUTHORIZED))
+      (asserts! (get bonded token) (err ERR_TOKEN_NOT_BONDED))
+      (asserts! (not (get pool-created token)) (err ERR_POOL_ALREADY_CREATED))
+      (asserts! (> (get amount curve-balance) u0) (err ERR_INSUFFICIENT_CURVE_BALANCE))
       (map-set token-data
         {id: id}
         (merge token {pool-created: true}))
+      (print {event: "prepare-pool-creation", token-id: id})
       (ok {curve-balance: (get amount curve-balance)}))))
 
-;; Function to confirm pool creation
+;; Confirm pool creation
 (define-public (confirm-pool-creation (id uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id}))))
     (begin
-      (asserts! (is-eq tx-sender PLATFORM) (err u403))
-      (asserts! (get pool-created token) (err u707))
+      (asserts! (is-eq tx-sender PLATFORM) (err ERR_UNAUTHORIZED))
+      (asserts! (get pool-created token) (err ERR_POOL_ALREADY_CREATED))
       (map-set curve-balances
         {id: id}
         {amount: u0})
+      (print {event: "confirm-pool-creation", token-id: id})
       (ok true))))
 
-;; Function to withdraw STX from curve balance
+;; Withdraw STX from curve balance
 (define-public (withdraw-curve-funds (id uint) (amount uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (curve-balance (unwrap-panic (map-get? curve-balances {id: id}))))
     (begin
-      (asserts! (is-eq tx-sender PLATFORM) (err u403))
-      (asserts! (get bonded token) (err u703))
-      (asserts! (>= (get amount curve-balance) amount) (err u705))
+      (asserts! (is-eq tx-sender PLATFORM) (err ERR_UNAUTHORIZED))
+      (asserts! (get bonded token) (err ERR_TOKEN_NOT_BONDED))
+      (asserts! (>= (get amount curve-balance) amount) (err ERR_INSUFFICIENT_CURVE_BALANCE))
+      
+      ;; Perform transfer
       (try! (as-contract (stx-transfer? amount (as-contract tx-sender) PLATFORM)))
       (map-set curve-balances
         {id: id}
         {amount: (- (get amount curve-balance) amount)})
+      (print {event: "withdraw-curve-funds", token-id: id, amount: amount})
       (ok true))))
 
-;; Function to transfer tokens between holders
+;; Transfer tokens between holders
 (define-public (transfer (id uint) (amount uint) (recipient principal))
   (let ((sender tx-sender)
         (token (unwrap-panic (map-get? token-data {id: id})))
@@ -545,18 +607,26 @@
         (tx-id (var-get transaction-counter)))
     (begin
       ;; Validate inputs
-      (asserts! (> amount u0) (err u400))
-      (asserts! (not (is-eq sender recipient)) (err u400))  ;; Prevent self-transfer
+      (asserts! (> amount u0) (err ERR_INVALID_INPUT))
+      (asserts! (not (is-eq sender recipient)) (err ERR_INVALID_INPUT))
       
-      ;; Prevent transfers if token is bonded
-      (asserts! (not (get bonded token)) (err u701))
-      (asserts! (>= (get amount sender-balance) amount) (err u700))
+      ;; Check if token is bonded
+      (asserts! (not (get bonded token))
+                (begin
+                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (err ERR_TOKEN_BONDED)))
+      
+      ;; Check balance
+      (asserts! (>= (get amount sender-balance) amount)
+                (begin
+                  (print {event: "error", error: "insufficient token balance", required: amount, available: (get amount sender-balance)})
+                  (err ERR_INSUFFICIENT_BALANCE)))
       
       ;; Update balances
       (update-holder id sender (- amount))
       (update-holder id recipient amount)
       
-      ;; Log transfer transaction
+      ;; Log transfer
       (map-set transactions
         {id: id, tx-id: tx-id}
         {
@@ -568,7 +638,6 @@
           tx-type: "trns",
           block-height: block-height
         })
-      ;; Emit event
       (print {
         event: "transfer",
         token-id: id,
@@ -581,7 +650,7 @@
       (var-set transaction-counter (+ tx-id u1))
       (ok true))))
 
-;; Function to burn tokens
+;; Burn tokens
 (define-public (burn (id uint) (amount uint))
   (let ((sender tx-sender)
         (token (unwrap-panic (map-get? token-data {id: id})))
@@ -589,16 +658,22 @@
         (total-supply (get total-supply token))
         (total-sold (get total-sold token)))
     (begin
-      ;; Prevent burning if token is bonded
-      (asserts! (not (get bonded token)) (err u701))  ;; Error u701: Token is bonded, trading is frozen
-      (asserts! (>= (get amount sender-balance) amount) (err u700))  ;; Error u700: Insufficient balance
+      ;; Check if token is bonded
+      (asserts! (not (get bonded token))
+                (begin
+                  (print {event: "error", error: "token is bonded", token-id: id})
+                  (err ERR_TOKEN_BONDED)))
       
-      ;; Update sender's balance
+      ;; Check balance
+      (asserts! (>= (get amount sender-balance) amount)
+                (begin
+                  (print {event: "error", error: "insufficient token balance", required: amount, available: (get amount sender-balance)})
+                  (err ERR_INSUFFICIENT_BALANCE)))
+      
+      ;; Update balances
       (map-set balances
         {id: id, owner: sender}
         {amount: (- (get amount sender-balance) amount)})
-      
-      ;; Update total supply and total sold
       (map-set token-data
         {id: id}
         (merge token {
@@ -606,42 +681,39 @@
           total-sold: (- total-sold amount)
         }))
       
-      ;; Log burn transaction
+      ;; Log burn
       (let ((tx-id (var-get transaction-counter)))
-        (begin
-          (map-set transactions
-            {id: id, tx-id: tx-id}
-            {
-              user: sender,
-              amount: amount,
-              price: u0,  ;; No price for burns
-              total-cost: u0,  ;; No cost for burns
-              fee: u0,  ;; No fee for burns
-              tx-type: "burn",  ;; Burn type
-              block-height: block-height
-            })
-          ;; Emit event
-          (print {
-            event: "burn",
-            token-id: id,
-            tx-id: tx-id,
-            sender: sender,
+        (map-set transactions
+          {id: id, tx-id: tx-id}
+          {
+            user: sender,
             amount: amount,
-            new-supply: (- total-supply amount),
+            price: u0,
+            total-cost: u0,
+            fee: u0,
+            tx-type: "burn",
             block-height: block-height
           })
-          (var-set transaction-counter (+ tx-id u1))))
-      
+        (print {
+          event: "burn",
+          token-id: id,
+          tx-id: tx-id,
+          sender: sender,
+          amount: amount,
+          new-supply: (- total-supply amount),
+          block-height: block-height
+        })
+        (var-set transaction-counter (+ tx-id u1)))
       (ok true))))
 
-;; Function to get current balance of a holder
+;; Get current balance of a holder
 (define-read-only (get-balance (id uint) (holder principal))
   (let ((balance (map-get? balances {id: id, owner: holder})))
     (if (is-none balance)
         (ok {amount: u0})
         (ok (unwrap-panic balance)))))
 
-;; Function to get token list with all market data
+;; Get token list with market data
 (define-read-only (get-token-list (offset uint) (limit uint))
   (let ((end-id (var-get token-counter))
         (start-id offset)
@@ -649,20 +721,18 @@
     (ok (list
       (let ((token (unwrap-panic (map-get? token-data {id: start-id})))
             (price-result (unwrap-panic (get-price (get total-sold token))))
-            (price (get price price-result))
-            (price-24h-ago (get price-24h-ago token))
-            (price-7d-ago (get price-7d-ago token)))
-        (ok {
+            (price (get price price-result)))
+        {
           id: start-id,
           name: (get name token),
           symbol: (get symbol token),
           logo-url: (get logo-url token),
           price: price,
-          price-change-24h: (if (> price-24h-ago u0)
-                               (* (/ (- price price-24h-ago) price-24h-ago) u100)
+          price-change-24h: (if (> (get price-24h-ago token) u0)
+                               (* (/ (- price (get price-24h-ago token)) (get price-24h-ago token)) u100)
                                u0),
-          price-change-7d: (if (> price-7d-ago u0)
-                              (* (/ (- price price-7d-ago) price-7d-ago) u100)
+          price-change-7d: (if (> (get price-7d-ago token) u0)
+                              (* (/ (- price (get price-7d-ago token)) (get price-7d-ago token)) u100)
                               u0),
           market-cap: (* price (get total-supply token)),
           volume-24h: (get volume-24h token),
@@ -670,57 +740,53 @@
           holders: (get holder-count token),
           bonded: (get bonded token),
           ascended: (get pool-created token)
-        }))
-      (let ((token (unwrap-panic (map-get? token-data {id: (+ start-id u1)})))
-            (price-result (unwrap-panic (get-price (get total-sold token))))
-            (price (get price price-result))
-            (price-24h-ago (get price-24h-ago token))
-            (price-7d-ago (get price-7d-ago token)))
-        (ok {
-          id: (+ start-id u1),
-          name: (get name token),
-          symbol: (get symbol token),
-          logo-url: (get logo-url token),
-          price: price,
-          price-change-24h: (if (> price-24h-ago u0)
-                               (* (/ (- price price-24h-ago) price-24h-ago) u100)
-                               u0),
-          price-change-7d: (if (> price-7d-ago u0)
-                              (* (/ (- price price-7d-ago) price-7d-ago) u100)
-                              u0),
-          market-cap: (* price (get total-supply token)),
-          volume-24h: (get volume-24h token),
-          volume-7d: (get volume-7d token),
-          holders: (get holder-count token),
-          bonded: (get bonded token),
-          ascended: (get pool-created token)
-        }))
-      ;; ... repeat for other tokens ...
+        })
+      (if (< (+ start-id u1) max-id)
+          (let ((token (unwrap-panic (map-get? token-data {id: (+ start-id u1)})))
+                (price-result (unwrap-panic (get-price (get total-sold token))))
+                (price (get price price-result)))
+            {
+              id: (+ start-id u1),
+              name: (get name token),
+              symbol: (get symbol token),
+              logo-url: (get logo-url token),
+              price: price,
+              price-change-24h: (if (> (get price-24h-ago token) u0)
+                                   (* (/ (- price (get price-24h-ago token)) (get price-24h-ago token)) u100)
+                                   u0),
+              price-change-7d: (if (> (get price-7d-ago token) u0)
+                                  (* (/ (- price (get price-7d-ago token)) (get price-7d-ago token)) u100)
+                                  u0),
+              market-cap: (* price (get total-supply token)),
+              volume-24h: (get volume-24h token),
+              volume-7d: (get volume-7d token),
+              holders: (get holder-count token),
+              bonded: (get bonded token),
+              ascended: (get pool-created token)
+            })
+          {id: u0, name: "", symbol: "", logo-url: "", price: u0, price-change-24h: u0, price-change-7d: u0, market-cap: u0, volume-24h: u0, volume-7d: u0, holders: u0, bonded: false, ascended: false})
     ))))
 
-;; Function to get token count
+;; Get token count
 (define-read-only (get-token-count)
   (ok (var-get token-counter)))
 
-;; Function to get token market data
+;; Get token market data
 (define-read-only (get-token-market-data (id uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (price-result (unwrap-panic (get-price (get total-sold token))))
-        (price (get price price-result))
-        (last-price (get last-price token))
-        (price-24h-ago (get price-24h-ago token))
-        (price-7d-ago (get price-7d-ago token)))
+        (price (get price price-result)))
     (ok {
       id: id,
       name: (get name token),
       symbol: (get symbol token),
       logo-url: (get logo-url token),
       price: price,
-      price-change-24h: (if (> price-24h-ago u0)
-                           (* (/ (- price price-24h-ago) price-24h-ago) u100)
+      price-change-24h: (if (> (get price-24h-ago token) u0)
+                           (* (/ (- price (get price-24h-ago token)) (get price-24h-ago token)) u100)
                            u0),
-      price-change-7d: (if (> price-7d-ago u0)
-                          (* (/ (- price price-7d-ago) price-7d-ago) u100)
+      price-change-7d: (if (> (get price-7d-ago token) u0)
+                          (* (/ (- price (get price-7d-ago token)) (get price-7d-ago token)) u100)
                           u0),
       market-cap: (* price (get total-supply token)),
       volume-24h: (get volume-24h token),
@@ -730,7 +796,7 @@
       ascended: (get pool-created token)
     })))
 
-;; Function to get holder information
+;; Get holder information
 (define-read-only (get-holder-info (id uint) (holder principal))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (total-supply (get total-supply token))
@@ -741,14 +807,14 @@
       percentage: (* (/ (get amount balance) total-supply) u100)
     })))
 
-;; Function to get bonding curve balance
+;; Get bonding curve balance
 (define-read-only (get-curve-balance (id uint))
   (let ((curve-balance (map-get? curve-balances {id: id})))
     (if (is-none curve-balance)
         (ok {amount: u0})
         (ok (unwrap-panic curve-balance)))))
 
-;; Function to get bonding curve info
+;; Get bonding curve info
 (define-read-only (get-bonding-curve-info (id uint))
   (let ((token (unwrap-panic (map-get? token-data {id: id})))
         (total-supply (get total-supply token))
@@ -761,16 +827,16 @@
       threshold: (var-get graduation-threshold)
     })))
 
-;; Function to get TradingView price data
+;; Get TradingView price data
 (define-read-only (get-tradingview-data (id uint) (timeframe uint) (block uint))
   (let ((price-data (map-get? price-history {id: id, timeframe: timeframe, block: block})))
     (if (is-some price-data)
         (ok (unwrap-panic price-data))
-        (err u404))))  ;; Return error if no data found for the block
+        (err ERR_NOT_FOUND))))
 
-;; Function to get multiple blocks of price data
+;; Get multiple blocks of price data
 (define-read-only (get-tradingview-data-range (id uint) (timeframe uint) (start-block uint) (end-block uint))
   (let ((price-data (map-get? price-history {id: id, timeframe: timeframe, block: start-block})))
     (if (is-some price-data)
         (ok (unwrap-panic price-data))
-        (err u404))))
+        (err ERR_NOT_FOUND))))
