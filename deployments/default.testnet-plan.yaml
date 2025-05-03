@@ -5,4 +5,14 @@ network: testnet
 stacks-node: "https://stacks-node-api.testnet.stacks.co"
 bitcoin-node: "http://blockstack:blockstacksystem@bitcoind.testnet.stacks.co:18332"
 plan:
-  batches: []
+  batches:
+    - id: 0
+      transactions:
+        - contract-publish:
+            contract-name: bondingcurvestxfun
+            expected-sender: ST3CXK0GQ3QEFJ57K1YHRG3CKYXAEQ9QP1JDQ6K2Z
+            cost: 32478
+            path: contracts/bondingcurvestxfun2.clar
+            anchor-block-only: true
+            clarity-version: 2
+      epoch: "2.4"
